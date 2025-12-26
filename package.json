@@ -19,7 +19,6 @@
     "nano": "^10.1.2"
   },
   "devDependencies": {
-    "@types/bun": "latest",
     "@types/nano": "^7.0.0"
   },
   "peerDependencies": {

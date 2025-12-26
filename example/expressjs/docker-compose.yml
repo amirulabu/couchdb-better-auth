@@ -1,0 +1,12 @@
+services:
+  couchdb:
+    image: couchdb:3
+    container_name: couchdb-dev
+    ports:
+      - "5984:5984"
+    environment:
+      - COUCHDB_USER=admin
+      - COUCHDB_PASSWORD=password
+    volumes:
+      - ./local.ini:/opt/couchdb/etc/local.d/local.ini
+  
