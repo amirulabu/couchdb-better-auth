@@ -140,6 +140,32 @@ Enable debug logging. Can be:
 - The adapter automatically handles CouchDB's `_id` and `_rev` fields
 - All Better-Auth where clause operators are supported and converted to CouchDB Mango selectors
 
+## Testing
+
+The adapter uses the official Better-Auth adapter test suite. To run the tests:
+
+1. **Start a CouchDB instance** (e.g., using Docker):
+   ```bash
+   docker run -d -p 5984:5984 -e COUCHDB_USER=admin -e COUCHDB_PASSWORD=password apache/couchdb:latest
+   ```
+
+2. **Set the CouchDB URL** (optional, defaults to `http://admin:password@localhost:5984`):
+   ```bash
+   export COUCHDB_URL=http://admin:password@localhost:5984
+   ```
+
+3. **Run the tests**:
+   ```bash
+   pnpm test
+   ```
+
+   Or in watch mode:
+   ```bash
+   pnpm test:watch
+   ```
+
+The test suite will automatically create and clean up test databases.
+
 ## License
 
 MIT

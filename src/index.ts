@@ -44,15 +44,27 @@ function convertWhereArrayToRecord(whereArray: unknown): Record<string, unknown>
   }
 
   // Convert Where[] array format to nested object format
-  const result: Record<string, unknown> = {};
-  const andConditions: Record<string, unknown>[] = [];
-  
+  // Process conditions sequentially, grouping consecutive OR conditions
+  const conditions: Array<{ field: string; operator: string; value: unknown; connector?: string }> = [];
   for (const condition of whereArray as Array<{ field: string; operator: string; value: unknown; connector?: string }>) {
-    if (!condition.field) continue;
-    
+    if (condition.field) {
+      conditions.push(condition);
+    }
+  }
+  
+  if (conditions.length === 0) {
+    return null;
+  }
+  
+  const finalConditions: unknown[] = [];
+  let currentOrGroup: Record<string, unknown>[] | null = null;
+  
+  for (let i = 0; i < conditions.length; i++) {
+    const condition = conditions[i]!;
     const field = condition.field;
     const operator = condition.operator;
     const value = condition.value;
+    const connector = condition.connector;
     
     let opKey: string;
     switch (operator) {
@@ -98,27 +110,47 @@ function convertWhereArrayToRecord(whereArray: unknown): Record<string, unknown>
         opKey = operator;
     }
     
-    if (condition.connector === "OR") {
-      // Handle OR conditions
-      if (!result.OR) {
-        result.OR = [];
+    const conditionObj = { [field]: { [opKey]: value } };
+    
+    if (connector === "OR") {
+      // Add to current OR group
+      if (!currentOrGroup) {
+        currentOrGroup = [];
       }
-      (result.OR as unknown[]).push({ [field]: { [opKey]: value } });
+      currentOrGroup.push(conditionObj);
     } else {
-      // Default to AND
-      andConditions.push({ [field]: { [opKey]: value } });
+      // AND connector (or first condition)
+      // Close any open OR group first
+      if (currentOrGroup) {
+        if (currentOrGroup.length === 1) {
+          finalConditions.push(currentOrGroup[0]);
+        } else {
+          finalConditions.push({ OR: currentOrGroup });
+        }
+        currentOrGroup = null;
+      }
+      // Add AND condition
+      finalConditions.push(conditionObj);
     }
   }
   
-  if (andConditions.length > 0) {
-    if (andConditions.length === 1) {
-      Object.assign(result, andConditions[0]);
+  // Close any remaining OR group
+  if (currentOrGroup) {
+    if (currentOrGroup.length === 1) {
+      finalConditions.push(currentOrGroup[0]);
     } else {
-      result.AND = andConditions;
+      finalConditions.push({ OR: currentOrGroup });
     }
   }
   
-  return Object.keys(result).length > 0 ? result : null;
+  // Build final result
+  if (finalConditions.length === 0) {
+    return null;
+  } else if (finalConditions.length === 1) {
+    return finalConditions[0] as Record<string, unknown>;
+  } else {
+    return { AND: finalConditions };
+  }
 }
 
 /**
@@ -187,16 +219,23 @@ function convertWhereToSelector(where: Record<string, unknown> | unknown): Mango
           case "lte":
             operators.$lte = opValue;
             break;
-          case "contains":
+          case "contains": {
             // CouchDB uses $regex for contains
-            operators.$regex = `.*${escapeRegex(String(opValue))}.*`;
+            // Note: CouchDB regex is case-sensitive
+            const containsPattern = String(opValue);
+            operators.$regex = `.*${escapeRegex(containsPattern)}.*`;
             break;
-          case "startsWith":
-            operators.$regex = `^${escapeRegex(String(opValue))}.*`;
+          }
+          case "startsWith": {
+            const startsPattern = String(opValue);
+            operators.$regex = `^${escapeRegex(startsPattern)}.*`;
             break;
-          case "endsWith":
-            operators.$regex = `.*${escapeRegex(String(opValue))}$`;
+          }
+          case "endsWith": {
+            const endsPattern = String(opValue);
+            operators.$regex = `.*${escapeRegex(endsPattern)}$`;
             break;
+          }
           default:
             // Unknown operator, pass through
             operators[op] = opValue;
@@ -229,6 +268,25 @@ function cleanDocumentForTransform(doc: CouchDBDocument): Record<string, unknown
     cleaned.id = cleaned._id;
   }
   return cleaned;
+}
+
+/**
+ * Merge original DB fields back into the transformed result.
+ * This preserves custom field names that might have been remapped by transformOutput.
+ * For example, if schema maps email -> email_address, we need to keep email_address in the result.
+ */
+function mergeOriginalFields(transformed: Record<string, unknown>, original: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...transformed };
+  // Copy any fields from original that aren't in the transformed result
+  // Skip internal fields like _id, _rev, betterAuthModel
+  for (const key of Object.keys(original)) {
+    if (key !== '_id' && key !== '_rev' && key !== 'betterAuthModel' && key !== 'id') {
+      if (!(key in result) || result[key] === undefined) {
+        result[key] = original[key];
+      }
+    }
+  }
+  return result;
 }
 
 /**
@@ -328,7 +386,10 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
           log("[couchdbAdapter][create] called with:", { model, data, select });
           const db = await getDatabase(couch, getModelName(model), config);
           log("[couchdbAdapter][create] got database for model:", getModelName(model));
-          const transformedData = await transformInput(data, getDefaultModelName(model), "create");
+          const baseTransformed = await transformInput(data, getDefaultModelName(model), "create");
+          // Merge original data with transformed data to preserve custom field names
+          // transformInput may drop fields that have been renamed in schema
+          const transformedData = { ...data, ...baseTransformed };
           log("[couchdbAdapter][create] transformedData:", transformedData);
 
           // Ensure _id is set
@@ -355,10 +416,29 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
             log("[couchdbAdapter][create] fetched fullDoc:", fullDoc);
             const cleaned = cleanDocumentForTransform(fullDoc as CouchDBDocument);
             log("[couchdbAdapter][create] cleaned doc:", cleaned);
-            const result = await transformOutput(cleaned, getDefaultModelName(model));
+            const transformed = await transformOutput(cleaned, getDefaultModelName(model));
+            // Merge back original DB fields to preserve custom field names
+            const result = mergeOriginalFields(transformed, cleaned);
             log("[couchdbAdapter][create] result:", result);
             return result;
           } catch (error: unknown) {
+            // Handle conflict - if document with same _id exists, delete it and retry
+            if ((error as { statusCode?: number }).statusCode === 409 && transformedData._id) {
+              logWarn("[couchdbAdapter][create] conflict detected, deleting existing document and retrying:", transformedData._id);
+              try {
+                const existing = await db.get(transformedData._id);
+                await db.destroy(transformedData._id, (existing as CouchDBDocument)._rev || "");
+                log("[couchdbAdapter][create] deleted existing document, retrying insert");
+                const response = await db.insert(transformedData as CouchDBDocument);
+                const fullDoc = await db.get(response.id);
+                const cleaned = cleanDocumentForTransform(fullDoc as CouchDBDocument);
+                const transformed = await transformOutput(cleaned, getDefaultModelName(model));
+                return mergeOriginalFields(transformed, cleaned);
+              } catch (retryError: unknown) {
+                logError("[couchdbAdapter][create] error during retry:", retryError);
+                throw retryError;
+              }
+            }
             logError("[couchdbAdapter][create] error:", error);
             debugLog?.("create", { error, model, data: transformedData });
             throw error;
@@ -452,7 +532,8 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
             log("[couchdbAdapter][update] fetched fullDoc:", fullDoc);
             const cleaned = cleanDocumentForTransform(fullDoc as CouchDBDocument);
             log("[couchdbAdapter][update] cleaned doc:", cleaned);
-            return await transformOutput(cleaned, getDefaultModelName(model));
+            const transformed = await transformOutput(cleaned, getDefaultModelName(model));
+            return mergeOriginalFields(transformed, cleaned);
           } catch (error: unknown) {
             logError("[couchdbAdapter][update] error:", error);
             if ((error as { statusCode?: number }).statusCode === 404) {
@@ -476,19 +557,26 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
               log("[couchdbAdapter][update] fetched fullDoc (retry):", fullDoc);
               const cleaned = cleanDocumentForTransform(fullDoc as CouchDBDocument);
               log("[couchdbAdapter][update] cleaned doc (retry):", cleaned);
-              return await transformOutput(cleaned, getDefaultModelName(model));
+              const transformed = await transformOutput(cleaned, getDefaultModelName(model));
+              return mergeOriginalFields(transformed, cleaned);
             }
             debugLog?.("update", { error, model, where: transformedWhere, data: transformedData });
             throw error;
           }
         },
 
-        updateMany: async ({ data, model, where }: { data: Record<string, unknown>; model: string; where: Record<string, unknown> }) => {
+        updateMany: async (args: { data?: Record<string, unknown>; update?: Record<string, unknown>; model: string; where: Record<string, unknown> }) => {
+          // Note: better-auth passes update data as "update" not "data"
+          const { model, where } = args;
+          const data = args.update ?? args.data;
           log("[couchdbAdapter][updateMany] called with:", { model, data, where });
           const db = await getDatabase(couch, getModelName(model), config);
           log("[couchdbAdapter][updateMany] got database for model:", getModelName(model));
           const transformedWhere = transformWhereClause({ where: where as any, model: getDefaultModelName(model) });
           log("[couchdbAdapter][updateMany] transformedWhere:", transformedWhere);
+          if (!data) {
+            throw new Error("updateMany requires data or update parameter");
+          }
           const transformedData = await transformInput(data, getDefaultModelName(model), "update");
           log("[couchdbAdapter][updateMany] transformedData:", transformedData);
           const selector = convertWhereToSelector(transformedWhere as unknown);
@@ -687,7 +775,8 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
               }
               const cleaned = cleanDocumentForTransform(doc);
               log("[couchdbAdapter][findOne] cleaned doc (by id):", cleaned);
-              return await transformOutput(cleaned, getDefaultModelName(model));
+              const transformed = await transformOutput(cleaned, getDefaultModelName(model));
+              return mergeOriginalFields(transformed, cleaned);
             }
 
             // Otherwise, use find with selector
@@ -708,7 +797,8 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
 
             const cleaned = cleanDocumentForTransform(result.docs[0] as CouchDBDocument);
             log("[couchdbAdapter][findOne] cleaned doc:", cleaned);
-            return await transformOutput(cleaned, getDefaultModelName(model));
+            const transformed = await transformOutput(cleaned, getDefaultModelName(model));
+            return mergeOriginalFields(transformed, cleaned);
           } catch (error: unknown) {
             if ((error as { statusCode?: number }).statusCode === 404) {
               log("[couchdbAdapter][findOne] 404 while fetching doc, returning null");
@@ -720,16 +810,28 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
           }
         },
 
-        findMany: async ({ where, model, select, limit, offset, orderBy }: { where: Record<string, unknown>; model: string; select?: unknown; limit?: number; offset?: number; orderBy?: Array<{ field: string; direction: "asc" | "desc" }> }) => {
+        findMany: async (args: { where: Record<string, unknown>; model: string; select?: unknown; limit?: number; offset?: number; orderBy?: Array<{ field: string; direction: "asc" | "desc" }>; sortBy?: { field: string; direction: "asc" | "desc" } }) => {
+          const { where, model, select, limit, offset, sortBy } = args;
+          // better-auth might pass sortBy (object) or orderBy (array)
+          const orderBy = args.orderBy || (sortBy ? [sortBy] : undefined);
           log("[couchdbAdapter][findMany] called with:", { model, where, select, limit, offset, orderBy });
           const db = await getDatabase(couch, getModelName(model), config);
           log("[couchdbAdapter][findMany] got database for model:", getModelName(model));
           const transformedWhere = transformWhereClause({ where: where as any, model: getDefaultModelName(model) });
           log("[couchdbAdapter][findMany] transformedWhere:", transformedWhere);
-          const selector = convertWhereToSelector(transformedWhere as unknown);
+          let selector = convertWhereToSelector(transformedWhere as unknown);
           // Add betterAuthModel filter when using shared database
           if (!config.useModelAsDatabase) {
-            selector.betterAuthModel = getModelName(model);
+            // If selector already has $and, add betterAuthModel to it
+            if (selector.$and && Array.isArray(selector.$and)) {
+              selector.$and.push({ betterAuthModel: getModelName(model) });
+            } else if (Object.keys(selector).length > 0) {
+              // Wrap existing selector in $and with betterAuthModel
+              selector = { $and: [selector, { betterAuthModel: getModelName(model) }] };
+            } else {
+              // Empty selector, just add betterAuthModel
+              selector.betterAuthModel = getModelName(model);
+            }
             log("[couchdbAdapter][findMany] added betterAuthModel filter to selector");
           }
           log("[couchdbAdapter][findMany] selector:", selector);
@@ -742,6 +844,15 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
               sort?: SortOrder[];
             } = { selector };
 
+            // Convert orderBy to CouchDB sort format (must be before limit/offset)
+            if (orderBy && Array.isArray(orderBy) && orderBy.length > 0) {
+              query.sort = orderBy.map((order) => {
+                const field = getFieldName({ model, field: order.field });
+                return { [field]: order.direction === "desc" ? "desc" : "asc" };
+              });
+              log("[couchdbAdapter][findMany] applied sort:", query.sort);
+            }
+
             if (limit !== undefined) {
               query.limit = limit;
               log("[couchdbAdapter][findMany] applied limit:", limit);
@@ -752,21 +863,67 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
               log("[couchdbAdapter][findMany] applied offset (skip):", offset);
             }
 
-            // Convert orderBy to CouchDB sort format
-            if (orderBy && Array.isArray(orderBy) && orderBy.length > 0) {
-              query.sort = orderBy.map((order) => {
-                const field = getFieldName({ model, field: order.field });
-                return { [field]: order.direction === "desc" ? "desc" : "asc" };
-              });
-              log("[couchdbAdapter][findMany] applied sort:", query.sort);
-            }
-
             log("[couchdbAdapter][findMany] final query:", query);
-            const result = await db.find(query);
+            let result: { docs: unknown[]; bookmark?: string };
+            let needsInMemorySort = false;
+            let needsInMemoryOffset = false;
+            try {
+              result = await db.find(query);
+            } catch (error: unknown) {
+              // Handle case where CouchDB can't sort or skip due to missing index
+              if ((error as { statusCode?: number; error?: string }).statusCode === 400 && 
+                  (error as { error?: string }).error === "no_usable_index") {
+                logWarn("[couchdbAdapter][findMany] CouchDB index issue, fetching all and applying sort/offset in memory");
+                // Fetch all results without sort/skip, then apply in memory
+                const queryWithoutSortSkip = { ...query };
+                delete queryWithoutSortSkip.sort;
+                delete queryWithoutSortSkip.skip;
+                result = await db.find(queryWithoutSortSkip);
+                if (query.sort) {
+                  needsInMemorySort = true;
+                }
+                if (query.skip) {
+                  needsInMemoryOffset = true;
+                }
+              } else {
+                throw error;
+              }
+            }
+            
+            // Apply in-memory sort if needed
+            if (needsInMemorySort && orderBy && orderBy.length > 0) {
+              log("[couchdbAdapter][findMany] applying in-memory sort");
+              result.docs.sort((a: unknown, b: unknown) => {
+                for (const order of orderBy) {
+                  const field = getFieldName({ model, field: order.field });
+                  const aVal = (a as Record<string, unknown>)[field];
+                  const bVal = (b as Record<string, unknown>)[field];
+                  let comparison = 0;
+                  if (aVal === undefined || aVal === null) comparison = 1;
+                  else if (bVal === undefined || bVal === null) comparison = -1;
+                  else if (aVal < bVal) comparison = -1;
+                  else if (aVal > bVal) comparison = 1;
+                  if (comparison !== 0) {
+                    return order.direction === "desc" ? -comparison : comparison;
+                  }
+                }
+                return 0;
+              });
+            }
+            
+            // Apply in-memory offset if needed
+            if (needsInMemoryOffset && offset !== undefined && offset > 0) {
+              log("[couchdbAdapter][findMany] applying in-memory offset");
+              result.docs = result.docs.slice(offset);
+            }
+            
             log("[couchdbAdapter][findMany] find() result:", { docsLength: result.docs.length, docs: result.docs });
             const cleaned = result.docs.map((doc: unknown) => cleanDocumentForTransform(doc as CouchDBDocument));
             log("[couchdbAdapter][findMany] cleaned docs:", cleaned);
-            return Promise.all(cleaned.map((doc: Record<string, unknown>) => transformOutput(doc, getDefaultModelName(model))));
+            return Promise.all(cleaned.map(async (doc: Record<string, unknown>) => {
+              const transformed = await transformOutput(doc, getDefaultModelName(model));
+              return mergeOriginalFields(transformed, doc);
+            }));
             
           } catch (error: unknown) {
             logError("[couchdbAdapter][findMany] error:", error);
