@@ -1,13 +1,25 @@
 {
   "name": "couchdb-better-auth",
-  "module": "index.ts",
-  "type": "module",
   "version": "0.1.0",
   "description": "Better-Auth adapter for CouchDB",
-  "main": "index.ts",
-  "types": "index.ts",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "module": "./dist/index.js",
   "exports": {
-    ".": "./index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
     "better-auth",
@@ -19,10 +31,10 @@
     "nano": "^10.1.2"
   },
   "devDependencies": {
-    "@types/nano": "^7.0.0"
+    "@types/nano": "^7.0.0",
+    "typescript": "^5.0.0"
   },
   "peerDependencies": {
-    "better-auth": "*",
-    "typescript": "^5"
+    "better-auth": "*"
   }
 }
