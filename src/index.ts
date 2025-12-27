@@ -31,6 +31,7 @@ export interface CouchDBAdapterConfig {
 interface CouchDBDocument {
   _id: string;
   _rev?: string;
+  betterAuthModel?: string; // Model type for shared database filtering
   [key: string]: unknown;
 }
 
@@ -222,6 +223,7 @@ function convertWhereToSelector(where: Record<string, unknown> | unknown): Mango
 function cleanDocumentForTransform(doc: CouchDBDocument): Record<string, unknown> {
   const cleaned = { ...doc };
   delete cleaned._rev;
+  delete cleaned.betterAuthModel; // Remove model type field used for filtering
   // Add id field from _id (better-auth expects this)
   if (cleaned._id) {
     cleaned.id = cleaned._id;
@@ -335,6 +337,12 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
             transformedData._id = transformedData.id;
           }
 
+          // Add betterAuthModel field when using shared database (useModelAsDatabase=false)
+          if (!config.useModelAsDatabase) {
+            transformedData.betterAuthModel = getModelName(model);
+            log("[couchdbAdapter][create] added betterAuthModel field:", transformedData.betterAuthModel);
+          }
+
           try {
             log("[couchdbAdapter][create] inserting into CouchDB");
             const response = await db.insert(transformedData as CouchDBDocument);
@@ -401,6 +409,11 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
             log("[couchdbAdapter][update] no direct id/_id in where, performing find() to resolve docId");
             // Try to find the document first
             const selector = convertWhereToSelector(transformedWhere as unknown);
+            // Add betterAuthModel filter when using shared database
+            if (!config.useModelAsDatabase) {
+              selector.betterAuthModel = getModelName(model);
+              log("[couchdbAdapter][update] added betterAuthModel filter to selector");
+            }
             log("[couchdbAdapter][update] selector for resolving docId:", selector);
             const result = await db.find({ selector, limit: 1 });
             log("[couchdbAdapter][update] find() result for resolving docId:", { docsLength: result.docs.length, docs: result.docs });
@@ -415,6 +428,11 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
           try {
             // Get existing document to preserve _rev
             const existing = (await db.get(docId)) as CouchDBDocument;
+            // Verify betterAuthModel matches when using shared database
+            if (!config.useModelAsDatabase && existing.betterAuthModel && existing.betterAuthModel !== getModelName(model)) {
+              logError("[couchdbAdapter][update] betterAuthModel mismatch, throwing");
+              throw new Error(`Document not found for update in model ${model}`);
+            }
             log("[couchdbAdapter][update] existing document:", existing);
             const updated = {
               ...existing,
@@ -474,6 +492,11 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
           const transformedData = await transformInput(data, getDefaultModelName(model), "update");
           log("[couchdbAdapter][updateMany] transformedData:", transformedData);
           const selector = convertWhereToSelector(transformedWhere as unknown);
+          // Add betterAuthModel filter when using shared database
+          if (!config.useModelAsDatabase) {
+            selector.betterAuthModel = getModelName(model);
+            log("[couchdbAdapter][updateMany] added betterAuthModel filter to selector");
+          }
           log("[couchdbAdapter][updateMany] selector:", selector);
 
           try {
@@ -553,6 +576,11 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
             log("[couchdbAdapter][delete] no direct id/_id in where, performing find() to resolve docId");
             // Try to find the document first
             const selector = convertWhereToSelector(transformedWhere as unknown);
+            // Add betterAuthModel filter when using shared database
+            if (!config.useModelAsDatabase) {
+              selector.betterAuthModel = getModelName(model);
+              log("[couchdbAdapter][delete] added betterAuthModel filter to selector");
+            }
             log("[couchdbAdapter][delete] selector for resolving docId:", selector);
             const result = await db.find({ selector, limit: 1 });
             log("[couchdbAdapter][delete] find() result for resolving docId:", { docsLength: result.docs.length, docs: result.docs });
@@ -568,6 +596,11 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
             if (!docId) return;
             log("[couchdbAdapter][delete] fetching doc to delete:", docId);
             const doc = (await db.get(docId)) as CouchDBDocument;
+            // Verify betterAuthModel matches when using shared database
+            if (!config.useModelAsDatabase && doc.betterAuthModel && doc.betterAuthModel !== getModelName(model)) {
+              log("[couchdbAdapter][delete] betterAuthModel mismatch, returning silently");
+              return;
+            }
             log("[couchdbAdapter][delete] fetched doc:", doc);
             await db.destroy(doc._id, doc._rev || "");
             log("[couchdbAdapter][delete] successfully destroyed doc:", docId);
@@ -591,6 +624,11 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
           const transformedWhere = transformWhereClause({ where: where as any, model: getDefaultModelName(model) });
           log("[couchdbAdapter][deleteMany] transformedWhere:", transformedWhere);
           const selector = convertWhereToSelector(transformedWhere as unknown);
+          // Add betterAuthModel filter when using shared database
+          if (!config.useModelAsDatabase) {
+            selector.betterAuthModel = getModelName(model);
+            log("[couchdbAdapter][deleteMany] added betterAuthModel filter to selector");
+          }
           log("[couchdbAdapter][deleteMany] selector:", selector);
 
           try {
@@ -642,6 +680,11 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
               log("[couchdbAdapter][findOne] fetching by id:", docId);
               const doc = (await db.get(docId)) as CouchDBDocument;
               log("[couchdbAdapter][findOne] fetched doc by id:", doc);
+              // Verify betterAuthModel matches when using shared database
+              if (!config.useModelAsDatabase && doc.betterAuthModel && doc.betterAuthModel !== getModelName(model)) {
+                log("[couchdbAdapter][findOne] betterAuthModel mismatch, returning null");
+                return null;
+              }
               const cleaned = cleanDocumentForTransform(doc);
               log("[couchdbAdapter][findOne] cleaned doc (by id):", cleaned);
               return await transformOutput(cleaned, getDefaultModelName(model));
@@ -649,6 +692,11 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
 
             // Otherwise, use find with selector
             const selector = convertWhereToSelector(transformedWhere as unknown);
+            // Add betterAuthModel filter when using shared database
+            if (!config.useModelAsDatabase) {
+              selector.betterAuthModel = getModelName(model);
+              log("[couchdbAdapter][findOne] added betterAuthModel filter to selector");
+            }
             log("[couchdbAdapter][findOne] selector (find):", selector);
             const result = await db.find({ selector, limit: 1 });
             log("[couchdbAdapter][findOne] find() result:", { docsLength: result.docs.length, docs: result.docs });
@@ -679,6 +727,11 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
           const transformedWhere = transformWhereClause({ where: where as any, model: getDefaultModelName(model) });
           log("[couchdbAdapter][findMany] transformedWhere:", transformedWhere);
           const selector = convertWhereToSelector(transformedWhere as unknown);
+          // Add betterAuthModel filter when using shared database
+          if (!config.useModelAsDatabase) {
+            selector.betterAuthModel = getModelName(model);
+            log("[couchdbAdapter][findMany] added betterAuthModel filter to selector");
+          }
           log("[couchdbAdapter][findMany] selector:", selector);
 
           try {
@@ -729,6 +782,11 @@ export const couchdbAdapter = (config: CouchDBAdapterConfig) => {
           const transformedWhere = transformWhereClause({ where: where as any, model: getDefaultModelName(model) });
           log("[couchdbAdapter][count] transformedWhere:", transformedWhere);
           const selector = convertWhereToSelector(transformedWhere as unknown);
+          // Add betterAuthModel filter when using shared database
+          if (!config.useModelAsDatabase) {
+            selector.betterAuthModel = getModelName(model);
+            log("[couchdbAdapter][count] added betterAuthModel filter to selector");
+          }
           log("[couchdbAdapter][count] selector:", selector);
 
           try {
