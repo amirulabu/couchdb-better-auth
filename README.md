@@ -1,3 +1,5 @@
+Important node: 95% vibe coded, use at own risk!
+
 # CouchDB Better-Auth Adapter
 
 A Better-Auth database adapter for CouchDB using the [nano](https://www.npmjs.com/package/nano) package.
