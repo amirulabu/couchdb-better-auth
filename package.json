@@ -1,5 +1,5 @@
 {
-  "name": "couchdb-better-auth",
+  "name": "@amirulabu/couchdb-better-auth",
   "version": "0.1.0",
   "description": "Better-Auth adapter for CouchDB",
   "type": "module",
@@ -36,5 +36,18 @@
   },
   "peerDependencies": {
     "better-auth": "*"
-  }
+  },
+  "directories": {
+    "example": "example"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/amirulabu/couchdb-better-auth.git"
+  },
+  "author": "@amirulabu",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/amirulabu/couchdb-better-auth/issues"
+  },
+  "homepage": "https://github.com/amirulabu/couchdb-better-auth#readme"
 }
