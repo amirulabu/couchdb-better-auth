@@ -1,11 +1,12 @@
-# This workflow will run tests using node and then publish a package to GitHub Packages when a release is created
+# This workflow will bump the version, run tests, and publish to npm when code is merged to master
 # For more information see: https://docs.github.com/en/actions/publishing-packages/publishing-nodejs-packages
 
 name: Node.js Package
 
 on:
-  release:
-    types: [created]
+  push:
+    branches:
+      - master
 
 permissions:
   id-token: write  # Required for OIDC
@@ -22,27 +23,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 'lts/*'
-      - name: Extract version from release tag
+      - name: Bump version
         id: version
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/}"
-          VERSION="${VERSION#v}"  # Remove 'v' prefix if present
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Extracted version: $VERSION"
-      - name: Update package.json version
-        run: |
-          npm pkg set version="${{ steps.version.outputs.version }}"
-      - name: Commit version update
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          VERSION=$(npm version patch --no-git-tag-version)
+          VERSION="${VERSION#v}"  # Remove 'v' prefix
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Bumped version to: $VERSION"
+      - name: Commit version update
+        run: |
           git add package.json
-          if git diff --staged --quiet; then
-            echo "No version change detected, skipping commit"
-          else
-            git commit -m "chore: bump version to ${{ steps.version.outputs.version }}"
-            git push
-          fi
+          git commit -m "chore: bump version to ${{ steps.version.outputs.version }}"
+          git push
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - run: pnpm test
@@ -52,6 +46,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Pull latest changes
+        run: git pull origin master
       - uses: pnpm/action-setup@v4
         with:
           version: 9
@@ -59,15 +58,12 @@ jobs:
         with:
           node-version: 'lts/*'
           registry-url: https://registry.npmjs.org/
-      - name: Extract version from release tag
+      - name: Get version from package.json
         id: version
         run: |
-          VERSION="${GITHUB_REF#refs/tags/}"
-          VERSION="${VERSION#v}"  # Remove 'v' prefix if present
+          VERSION=$(node -p "require('./package.json').version")
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-      - name: Update package.json version
-        run: |
-          npm pkg set version="${{ steps.version.outputs.version }}"
+          echo "Publishing version: $VERSION"
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - run: pnpm publish --no-git-checks
