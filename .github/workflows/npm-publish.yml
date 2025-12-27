@@ -6,8 +6,6 @@ name: Node.js Package
 on:
   release:
     types: [created]
-  push: 
-    branches: [fix-publish] # temporary for testing
 
 permissions:
   id-token: write  # Required for OIDC
@@ -72,6 +70,6 @@ jobs:
           npm pkg set version="${{ steps.version.outputs.version }}"
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
-      - run: pnpm publish
+      - run: pnpm publish --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{secrets.npm_token}}
