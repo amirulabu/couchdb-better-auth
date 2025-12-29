@@ -1,6 +1,6 @@
 {
   "name": "@amirulabu/couchdb-better-auth",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Better-Auth adapter for CouchDB",
   "type": "module",
   "main": "./dist/index.js",
